@@ -1,14 +1,23 @@
 #!/bin/bash
 
-# Auto-detect local subnet (e.g. 192.168.1.0/24)
-SUBNET=$(ip route | awk '/src/ {print $1}')
+# Auto-detect interface
 INTERFACE=$(ip route | awk '/src/ {print $3}')
-[ -z "$SUBNET" ] && SUBNET="192.168.1.0/24"
+# Auto-detect subnet of that interface
+SUBNET=$(ip -4 addr show "$INTERFACE" | awk '/inet /{print $2}')
+[ -z "$SUBNET" ] && SUBNET="10.0.0.0/24"  # fallback
 
 resolve_hostname() {
     local ip="$1"
 
-    # Try mDNS (Avahi) first
+    # 1. Try standard DNS (getent hosts)
+    local dns
+    dns=$(getent hosts "$ip" | awk '{print $2}')
+    if [ -n "$dns" ]; then
+        echo "$dns"
+        return
+    fi
+
+    # 2. Try mDNS (Avahi)
     local mdns
     mdns=$(avahi-resolve -a "$ip" 2>/dev/null | awk '{print $2}')
     if [ -n "$mdns" ]; then
@@ -16,21 +25,7 @@ resolve_hostname() {
         return
     fi
 
-    # Try SSH banner
-    # We send nothing (-n) and timeout quickly
-    local banner
-    banner=$(timeout 1 bash -c "echo -n | nc $ip 22" 2>/dev/null | head -n1)
-
-    # SSH banner example:
-    # SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1
-    if [[ "$banner" =~ SSH- ]]; then
-        # Try extracting hostname from "Ubuntu" or similar — not reliable,
-        # so instead use the IP as fallback.
-        echo "$ip"
-        return
-    fi
-
-    # Fallback: raw IP
+    # 3. Fallback to raw IP
     echo "$ip"
 }
 
@@ -47,9 +42,9 @@ while true; do
                                                                                                   
                                    Simple SSH browser by Jason Darby                              
                                                                                                   "
-    echo "Scanning $SUBNET for port 22..."
+    echo "Scanning $SUBNET for SSH (port 22)..."
 
-    # nmap scan
+    # Run nmap
     MAP=$(nmap -n -p22 --open "$SUBNET" -oG - 2>/dev/null)
     HOSTS=($(echo "$MAP" | awk '/22\/open/ {print $2}'))
 
@@ -68,19 +63,16 @@ while true; do
     echo
     echo "Press number to connect, or r to rescan..."
 
-    read -t 5 -n 1 CHOICE
-
+    read -t 10 -n 1 CHOICE
     [ -z "$CHOICE" ] && continue
     [[ "$CHOICE" == "r" ]] && continue
     [[ "$CHOICE" =~ ^[0-9]+$ ]] || continue
 
     INDEX=$((CHOICE - 1))
-
     if [ $INDEX -ge 0 ] && [ $INDEX -lt ${#HOSTS[@]} ]; then
         TARGET=${HOSTS[$INDEX]}
         clear
         echo "Connecting to $TARGET..."
-        echo
         read -p "Username: " USERNAME
         clear
         exec ssh "${USERNAME}@${TARGET}"
